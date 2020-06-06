@@ -1,0 +1,826 @@
+---
+title: "Performing a shot analysis on Kobe Bryant"
+subtitle: "STAT167 Final Report"
+author: |
+  | Oceans 4 
+  | (Lauren, Natasha, Patrick and Shiyuan)
+date: "06/05/2020"
+output:
+  bookdown::html_document2:
+    fig_caption: yes
+    toc: yes
+    toc_depth: 4
+nocite: |
+  @grolemund_r_nodate @tidyverse_2019 @lubridate_2011 @scales_2019 @modelr_2019 @broom_2019 @ggdendro_2016 @wickham_advanced_2014 @James2013
+fontsize: 12pt
+csl: ./bibliography/cell.csl
+bibliography: ./bibliography/ref.bib
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r chunkSetup,include=FALSE}
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\n \\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+}) # https://stackoverflow.com/questions/25646333/code-chunk-font-size-in-rmarkdown-with-knitr-and-latex
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = 'center', echo = FALSE, size = "scriptsize")
+```
+
+
+```{r LibData, include=FALSE}
+# load library 
+lib <- c("ggdendro", "broom", "modelr", "scales", "lubridate", "tidyverse")
+purrr::map(lib, library, character.only = TRUE, quietly = T,  warn.conflicts = F)
+
+# purrr::map(lib, ~{citation(.x) %>% toBibtex()}) # generate citation. 
+
+## Loading the data 
+kobe <- read_csv(file = "data/data.csv") %>% 
+  filter(!is.na(shot_made_flag)) %>% 
+  # mutate(shot_made_flag = factor(shot_made_flag)) %>% 
+  mutate(locy_new = (loc_y - 423)/440*43, locx_new = loc_x/250*25) %>% # locx_new and locy_new with court center at (0,0) and 
+  mutate(dist = sqrt((locx_new - 0)^2 + (locy_new - (-41.45))^2)) %>%  # the opponent rim center on current coordiante is at (0, -41.75)
+  mutate(home = if_else(grepl("vs.", matchup), "home", "away")) %>% 
+  mutate(t_sec = minutes_remaining * 60 + seconds_remaining) %>% 
+  select(-team_id, -team_name, -shot_id, -matchup) # never changed (team_name = Los Angeles Lakers; team_id = 1610612747)
+
+## read in the winlost game stats data 
+wl <- bind_rows(
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2015 to 2016") %>% dplyr::select(Date, G_results, Opp), 
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2014 to 2015") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2013 to 2014") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2012 to 2013") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2011 to 2012") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2010 to 2011") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2009 to 2010") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2008 to 2009") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2007 to 2008") %>% dplyr::select(Date, G_reults, Opp) %>% rename( G_results = G_reults),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2006 to 2007") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2005 to 2006") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2004 to 2005") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2003 to 2004") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2002 to 2003") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2001 to 2002") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "2000 to 2001") %>% dplyr::select(Date, G_results, Opp),
+    # readxl::read_xlsx("data/KobeWL.xlsx", sheet = "1999 to 2000") %>% dplyr::select(Date, G_results, Opp)
+    # readxl::read_xlsx("data/KobeWL.xlsx", sheet = "1998 to 1999") %>% dplyr::select(Date, G_results, Opp)
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "1997 to 1998") %>% dplyr::select(Date, G_results, Opp),
+    readxl::read_xlsx("data/KobeWL.xlsx", sheet = "1996 to 1997") %>% dplyr::select(Date, G_results, Opp)) %>% 
+    filter(!is.na(Date)) %>%
+    mutate(Date = as_date(as.character(Date))) %>% 
+    inner_join(., kobe %>% group_by(game_date) %>% nest(), by = c("Date" = "game_date")) %>% 
+    extract(G_results, c("WL", "pm", "diff"), "(W|L)\\ \\((\\+|\\-)([[:digit:]]+)") %>% 
+    mutate(WL = factor(WL),
+           accuracyByDay = map_dbl(data, ~mean(.x$shot_made_flag)), 
+           shootByDay = map_dbl(data, ~sum(.x$shot_made_flag)))
+    # readxl::read_xlsx("data/KobeWL.xlsx", sheet = "PLAYOFFS") %>% dplyr::select(Date, G_results, Opp)
+```
+
+```{r setting up the basketball function, include=FALSE}
+### https://gist.github.com/edkupfer/6354964 about drawing the 
+### basketball court is 22 ft to 108ft. 
+bc <- ggplot(data=data.frame(x=1,y=1),aes(x,y))+
+  ###outside box:
+  geom_path(data=data.frame(x=c(-25,-25,25,25,-25),y=c(-47,47,47,-47,-47)))+
+  ###halfcourt line:
+  geom_path(data=data.frame(x=c(-25,25),y=c(0,0)))+
+  ###halfcourt semicircle:
+  geom_path(data=data.frame(x=c(-6000:(-1)/1000,1:6000/1000),y=c(sqrt(6^2-c(-6000:(-1)/1000,1:6000/1000)^2))),aes(x=x,y=y))+
+  geom_path(data=data.frame(x=c(-6000:(-1)/1000,1:6000/1000),y=-c(sqrt(6^2-c(-6000:(-1)/1000,1:6000/1000)^2))),aes(x=x,y=y))+
+  ###solid FT semicircle above FT line:
+  geom_path(data=data.frame(x=c(-6000:(-1)/1000,1:6000/1000),y=c(28-sqrt(6^2-c(-6000:(-1)/1000,1:6000/1000)^2))),aes(x=x,y=y))+
+  geom_path(data=data.frame(x=c(-6000:(-1)/1000,1:6000/1000),y=-c(28-sqrt(6^2-c(-6000:(-1)/1000,1:6000/1000)^2))),aes(x=x,y=y))+
+  ###dashed FT semicircle below FT line:
+  geom_path(data=data.frame(x=c(-6000:(-1)/1000,1:6000/1000),y=c(28+sqrt(6^2-c(-6000:(-1)/1000,1:6000/1000)^2))),aes(x=x,y=y),linetype='dashed')+
+  geom_path(data=data.frame(x=c(-6000:(-1)/1000,1:6000/1000),y=-c(28+sqrt(6^2-c(-6000:(-1)/1000,1:6000/1000)^2))),aes(x=x,y=y),linetype='dashed')+
+  ###key:
+  geom_path(data=data.frame(x=c(-8,-8,8,8,-8),y=c(47,28,28,47,47)))+
+  geom_path(data=data.frame(x=-c(-8,-8,8,8,-8),y=-c(47,28,28,47,47)))+
+  ###box inside the key:
+  geom_path(data=data.frame(x=c(-6,-6,6,6,-6),y=c(47,28,28,47,47)))+
+  geom_path(data=data.frame(x=c(-6,-6,6,6,-6),y=-c(47,28,28,47,47)))+
+  ###restricted area semicircle:
+  geom_path(data=data.frame(x=c(-4000:(-1)/1000,1:4000/1000),y=c(41.25-sqrt(4^2-c(-4000:(-1)/1000,1:4000/1000)^2))),aes(x=x,y=y))+
+  geom_path(data=data.frame(x=c(-4000:(-1)/1000,1:4000/1000),y=-c(41.25-sqrt(4^2-c(-4000:(-1)/1000,1:4000/1000)^2))),aes(x=x,y=y))+
+  ###rim:
+  geom_path(data=data.frame(x=c(-750:(-1)/1000,1:750/1000,750:1/1000,-1:-750/1000),y=c(c(41.75+sqrt(0.75^2-c(-750:(-1)/1000,1:750/1000)^2)),c(41.75-sqrt(0.75^2-c(750:1/1000,-1:-750/1000)^2)))),aes(x=x,y=y))+
+  geom_path(data=data.frame(x=c(-750:(-1)/1000,1:750/1000,750:1/1000,-1:-750/1000),y=-c(c(41.75+sqrt(0.75^2-c(-750:(-1)/1000,1:750/1000)^2)),c(41.75-sqrt(0.75^2-c(750:1/1000,-1:-750/1000)^2)))),aes(x=x,y=y))+
+  ###backboard:
+  geom_path(data=data.frame(x=c(-3,3),y=c(43,43)),lineend='butt')+
+  geom_path(data=data.frame(x=c(-3,3),y=-c(43,43)),lineend='butt')+
+  ###three-point line:
+  geom_path(data=data.frame(x=c(-22,-22,-22000:(-1)/1000,1:22000/1000,22,22),y=c(47,47-169/12,41.75-sqrt(23.75^2-c(-22000:(-1)/1000,1:22000/1000)^2),47-169/12,47)),aes(x=x,y=y))+
+  geom_path(data=data.frame(x=c(-22,-22,-22000:(-1)/1000,1:22000/1000,22,22),y=-c(47,47-169/12,41.75-sqrt(23.75^2-c(-22000:(-1)/1000,1:22000/1000)^2),47-169/12,47)),aes(x=x,y=y)) + 
+  theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+###fix aspect ratio to 1:1
+
+bc_v <- bc + coord_fixed()
+bc_h <- bc + coord_flip()+ 
+  theme(aspect.ratio = 0.5)
+```
+
+
+```{r parameter, include=FALSE}
+#### parameters (please choose a good color scheme!! )
+tsh <- -13 # court color highlight of backfield
+scored <- "#e41a1c"
+missed <- "#377eb8"
+col5 <- c("#552583", "#FDB927", "#f781bf", "#377eb8", "#a65628")
+col6 <- c(col5, "#ff7f00")
+col7 <- c(col6, "#cab2d6")
+
+#### laker purple #552583, RGB 85, 37, 131
+#### laker yellow #FDB927  RGB 253, 185, 39
+
+#### theme for all plots. 
+plot_theme <- theme_bw() +
+  theme(legend.title=element_blank(),
+        legend.position="bottom",
+        axis.text.x=element_text(angle=45, hjust=1),
+        plot.title=element_text(hjust=0.5),
+        plot.subtitle=element_text(hjust=0.5)) 
+```
+
+#Objectives
+
+The objective of our project was to **figure out what variables contribute to Kobe Bryant’s success and accuracy as a player on the Los Angeles Lakers**. We figured the best way to go about this was to create sub questions that target each variable. 
+Our plan was to test correlation and figure out what to use in our prediction model. 
+Variables we were interested in looking at included Season (year), his age, how injured he was, his 3-point percentage, 2-point percentage, free throw percentage, shot types, and total points Kobe contributed to the game. 
+The variables that were part of our Kaggle dataset included: 
+shot made flags, combined shot type, period, shot distance, playoffs, season, shot type, shot zone area, shot zone basic, shot zone range, t sec or time remaining in game, home or away, and opponent.
+
+Our sub questions were: 
+- **Predicting how many shots Kobe will score in a given game using his accuracy?**
+ 
+- **What types of shots (layups, jump shots, etc.) does Kobe do best (highest accuracy)? **
+ 
+- **What are his strengths and weaknesses as a basketball player?**
+
+- **What parts of the court is he the most accurate in? (hotspots on the court)** 
+
+- **How clutch was Kobe?**
+
+- **What season(s) was Kobe’s prime?**
+ 
+- **How Kobe improved/ receded over time?**
+
+- **What is Kobe’s influence on the game’s win or loss? **
+
+
+# Data Exploration
+
+We chose to explore the dataset titled **“Kobe Bryant Shot Selection”**, which we got from Kaggle. It contains 25 variables related to the location on the court, action, opponent, date, time, type of game, and much more. We found other Kobe datasets, but chose this one because it seemed the cleanest and also had the most descriptive and clear variables. We chose this dataset because, as sports fans, we thought it would be interesting to work with, and also interesting for others looking at our work, especially since “Kobe” is such a familiar name to everyone. We hoped that highlighting Kobe’s amazing career through his data would help us all better appreciate his impact on both basketball, and the world.
+
+
+<!-- ```{r echo=FALSE, fig.align='center', fig.asp=1, out.height="180px", out.width="120px"} -->
+<!-- knitr::include_graphics("img/kobe image.jpg") -->
+<!-- ``` -->
+
+
+## Workflow 
+```{r, echo=FALSE, eval=FALSE}
+DiagrammeR::grViz("
+    digraph flow{
+    graph [layout = dot, rankdir = LR];
+    nodesep=1.0
+    node [shape = box, style = 'filled, bold', color = grey];
+    
+
+    kaggle[label = 'Kobe Bryant every shot records'];
+    eda[label = 'EDA'];
+    
+    subgraph cluster_level1{
+      label = 'Using tidyverse modeling method';
+      fontcolor = 'red'
+      hc[label = 'Hierarchical clustering']; 
+      shot_pred[label = 'Predicting shot (shot as the response)']; 
+      influ[label = 'Game influence (shot as a predictor)\nby joining with public available game stats.'];
+    }
+    
+    kaggle -> eda
+    eda -> hc
+    eda -> shot_pred
+    eda -> influ
+}")
+
+```
+
+![](./img/fc.png)
+
+## Visualization
+
+We wanted to visualize the different variables in this dataset that are relevant to the position of the court by plotting them on the court itself.
+
+### Hotspot throughout Kobe's Career
+
+ This visualization shows the position of each shot, and whether that shot was made (red) or not (blue). This shows us that the shots closest to the net are successful more than the shots far away from the net.
+ 
+```{r }
+bc_h + 
+  geom_point(data = kobe %>% filter(shot_made_flag == 0, locy_new <= tsh), mapping = aes(locx_new, locy_new), alpha = 0.08, color = missed)+
+  geom_point(data = kobe %>% filter(shot_made_flag == 1, locy_new <= tsh), mapping = aes(locx_new, locy_new), alpha = 0.08, color = scored)+
+  geom_point(data = kobe %>% filter(shot_made_flag == 0, locy_new > tsh), mapping = aes(locx_new, locy_new), alpha = 0.8, color = missed)+
+  geom_point(data = kobe %>% filter(shot_made_flag == 1, locy_new > tsh), mapping = aes(locx_new, locy_new), alpha = 0.8, color = scored)
+  
+```
+
+### Shot Zones
+
+This visualization shows how the variable “shot_zone_basic” is in relation to the court. We can see how each different area is defined for each shot taken from it.
+
+```{r }
+bc_h + 
+  geom_point(data = kobe %>% filter(locy_new <= tsh), mapping = aes(locx_new, locy_new, color = shot_zone_basic), alpha = 0.1)+
+  geom_point(data = kobe %>% filter(locy_new > tsh), mapping = aes(locx_new, locy_new, color = shot_zone_basic), alpha = 0.5) +
+  scale_color_manual(name = "", values = c("Backcourt" = col7[1], "Above the Break 3" = col7[2], "Mid-Range" = col7[3], "Restricted Area" = col7[4], "Left Corner 3" = col7[5], "Right Corner 3" = col7[6], "In The Paint (Non-RA)" = col7[7]), position = "bottom")+
+  theme(legend.position="bottom", legend.box = "horizontal")+
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 4), nrow = 2, byrow=TRUE))
+```
+
+### Shot Directions
+
+This visualization shows the variable “shot_zone_area”, which is the same as “shot_zone_basic”, except now it takes into account the side of the court the shot is taken from.
+
+```{r }
+bc_h + 
+  geom_point(data = kobe %>% filter(locy_new <= tsh), mapping = aes(locx_new, locy_new, color = shot_zone_area), alpha = 0.1)+
+  geom_point(data = kobe %>% filter(locy_new > tsh), mapping = aes(locx_new, locy_new, color = shot_zone_area), alpha = 0.5) +
+  scale_color_manual(name = "", values = c("Back Court(BC)" = col6[1], "Center(C)" = col6[2], "Left Side Center(LC)" = col6[3], "Right Side Center(RC)" = col6[4],  "Left Side(L)" = col6[5], "Right Side(R)" = col6[6]), position = "bottom")+
+  theme(legend.position="bottom", legend.box = "horizontal")+
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 4), nrow = 2, byrow=TRUE))
+```
+
+### Shot Distance 
+
+This visualization shows the variable “shot_zone_range”, which shows the distance the shot was taken from the net.
+
+```{r }
+bc_h + 
+  geom_point(data = kobe %>% filter(locy_new <= tsh), mapping = aes(locx_new, locy_new, color = shot_zone_range), alpha = 0.1)+
+  geom_point(data = kobe %>% filter(locy_new > tsh), mapping = aes(locx_new, locy_new, color = shot_zone_range), alpha = 0.5) +
+  scale_color_manual(name = "", values = c("Back Court Shot" = col5[1],  "24+ ft." = col5[2], "16-24 ft." = col5[3],  "Less Than 8 ft." = col5[4],"8-16 ft." = col5[5]), position = "bottom")+
+  theme(legend.position="bottom", legend.box = "horizontal")+
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 4), nrow = 2, byrow=TRUE))
+```
+
+### Shot Types
+
+This visualization shows the variable “combined_shot_type”, and shows where on the court each type of shot is taken.
+
+```{r }
+bc_h + 
+  geom_point(data = kobe %>% filter(combined_shot_type == "Jump Shot"), mapping = aes(locx_new, locy_new, color = combined_shot_type), alpha = 0.02)+
+  geom_point(data = kobe %>% filter(combined_shot_type != "Jump Shot"), mapping = aes(locx_new, locy_new, color = combined_shot_type), alpha = 0.2) +
+  scale_color_manual(name = "", values = c("Bank Shot" = col6[1], "Dunk" = col6[2], "Hook Shot" = col6[3], "Layup" = col6[4],  "Tip Shot" = col6[5], "Jump Shot" = col6[6]), position = "bottom")+
+  theme(legend.position="bottom", legend.box = "horizontal")+
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 4), nrow = 2, byrow=TRUE))
+```
+
+### What types of shots did Kobe do best?
+
+This bar graph shows the different types of shots, and their accuracy. From this we can see that the shots taken closest to the net have the highest accuracy.
+
+```{r , fig.height=5}
+kobe %>% 
+  filter(!is.na(shot_made_flag)) %>%
+  group_by(combined_shot_type) %>%
+  summarise(shot_type_prop = sum(shot_made_flag == 1)/n()) %>% 
+  ggplot(aes(x = reorder(combined_shot_type, shot_type_prop), y = shot_type_prop)) +
+  geom_bar(aes(fill = combined_shot_type), stat = "identity", show.legend = FALSE) +
+  xlab("Shot Type") +
+  ylab("Accuracy")+
+  scale_fill_manual(name = "", values = c("Bank Shot" = col6[1], "Dunk" = col6[2], "Hook Shot" = col6[3], "Layup" = col6[4],  "Tip Shot" = col6[5], "Jump Shot" = col6[6]))+
+  plot_theme
+```
+
+
+### What types of shots did Kobe do best?
+
+This bar graph shows the distribution of type of shots taken in each season. From this we can see that in the 2005-2006 season, Kobe has the most shots, and in every season, most of his shots were jump shots.
+
+```{r }
+kobe %>% 
+  select(season, combined_shot_type) %>%
+  filter(!is.na(combined_shot_type)) %>%
+  group_by(season) %>% 
+  ggplot(mapping = aes(x = season)) +
+  geom_bar(aes(fill = combined_shot_type)) +
+  coord_flip() +
+  xlab("Season") +
+  ylab("Shots Taken")+
+  scale_fill_manual(name = "", values = c("Bank Shot" = col6[1], "Dunk" = col6[2], "Hook Shot" = col6[3], "Layup" = col6[4],  "Tip Shot" = col6[5], "Jump Shot" = col6[6]))+
+  plot_theme
+```
+
+### What types of shots did Kobe do best?
+
+This violin plot shows the density of each type of shot taken, as the time remaining in the period decreases. We can see that as the period ends, tip shots are done the most.
+
+```{r }
+kobe %>% 
+  select(combined_shot_type, seconds_remaining, period) %>%
+  filter(!is.na(combined_shot_type), period == 4) %>%
+  ggplot() +
+  geom_violin(mapping = aes(x = combined_shot_type, y = seconds_remaining, fill = combined_shot_type))+
+  scale_fill_manual(name = "", values = c("Bank Shot" = col6[1], "Dunk" = col6[2], "Hook Shot" = col6[3], "Layup" = col6[4],  "Tip Shot" = col6[5], "Jump Shot" = col6[6]))+
+  plot_theme+
+  theme(legend.position="none")
+```
+
+
+### How's Kobe accuracy by opponents?
+
+This plot shows Kobe’s accuracy for 2-point shots and 3-point shots for each opponent they play against.
+
+```{r }
+kobe %>%
+  group_by(opponent, shot_type) %>%
+  summarise(accuracy = mean(shot_made_flag)) %>%
+  ggplot(aes(x = opponent, y = accuracy, group = shot_type, color = shot_type)) +
+  geom_point(size = 3) +
+  geom_line() +
+  labs(x="Opponent", y="Accuracy") +
+  scale_color_manual(name = "", values = col5[1:2])+
+  plot_theme
+
+```
+
+
+# Modeling by tidyverse. 
+
+We chose to implement a modeling method that is compatible with tidyverse [@tidyverse_2019] that was introduced by `broom` package vignettes [@broom_2019]. The method has changed the classifical "for-loop" depedent way of perform cross-validation [@James2013] to a vectorizing format, which was thought to be more computational and memory efficient [@wickham_advanced_2014]. We believed that implemented this method would be advantagous in handling large dataset, which was ~20K observation in our case. 
+
+```{r modeling,eval=FALSE, echo=TRUE, size = "tiny"}
+df <- kobe %>% 
+   select(shot_made_flag, shot_distance, t_sec, home, opponent, season) %>% 
+   modelr::crossv_kfold(k = 10) %>%   # produce training and test column 
+   mutate(glm = map(train, ~glm(shot_made_flag ~ ., data = .x, family = binomial)), # mapping training to glm
+          pred = map2(glm, test, ~predict.glm(object = .x, newdata = .y, type = "response")), # predict by test
+          pred_class = map(pred, ~if_else(.x > 0.5, 1, 0)), # apply a cutoff and obtain prediction class
+          true_class = map(test, ~{as_tibble(.x)$shot_made_flag}), # extract original label
+          misclass_error = map2_dbl(pred_class, mis_class, ~mean(.x != .y))) # calculating misclassification error
+```
+
+Briefly, the `modelr::crossv_kfold` was used to split the data into train and test set and outputed indexes, instead of repeating entries, into column "train" and "test". Then each step of modeling was stored in columns by creating variables through `dplyr::mutate`. To "mutate" from one column to the next, a serier of `purrr::map_*` functions "unpack" variables from each column, applied with an anonymous function and output respective format. 
+
+```{r modelOutput, eval=FALSE, echo=TRUE, size = "tiny"}
+# A tibble: 10 x 8
+   train        test         .id   glm          pred          pred_class    true_class    misclass_error
+   <named list> <named list> <chr> <named list> <named list>  <named list>  <named list>           <dbl>
+ 1 <resample>   <resample>   01    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.396
+ 2 <resample>   <resample>   02    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.405
+ 3 <resample>   <resample>   03    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.403
+ 4 <resample>   <resample>   04    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.4  
+ 5 <resample>   <resample>   05    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.400
+ 6 <resample>   <resample>   06    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.411
+ 7 <resample>   <resample>   07    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.405
+ 8 <resample>   <resample>   08    <glm>        <dbl [2,569]> <dbl [2,569]> <dbl [2,569]>          0.390
+ 9 <resample>   <resample>   09    <glm>        <dbl [2,569]> <dbl [2,569]> <dbl [2,569]>          0.417
+10 <resample>   <resample>   10    <glm>        <dbl [2,569]> <dbl [2,569]> <dbl [2,569]>          0.396
+```
+
+
+<!-- ## Detailed examination of the output  -->
+<!-- ```{r eval=FALSE, echo=TRUE, size = "tiny"} -->
+<!-- # A tibble: 10 x 8 -->
+<!--    train        test         .id   glm          pred          pred_class    true_class    misclass_error -->
+<!--    <named list> <named list> <chr> <named list> <named list>  <named list>  <named list>           <dbl> -->
+<!--  1 <resample>   <resample>   01    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.396 -->
+<!--  2 <resample>   <resample>   02    <glm>        <dbl [2,570]> <dbl [2,570]> <dbl [2,570]>          0.405 -->
+<!--   ... -->
+<!--  9 <resample>   <resample>   09    <glm>        <dbl [2,569]> <dbl [2,569]> <dbl [2,569]>          0.417 -->
+<!-- 10 <resample>   <resample>   10    <glm>        <dbl [2,569]> <dbl [2,569]> <dbl [2,569]>          0.396 -->
+<!-- ``` -->
+<!-- ```{r eval=FALSE, echo=TRUE, size = "tiny"} -->
+<!-- str(df$test[[1]]) -->
+<!-- List of 2 -->
+<!--  $ data: tibble [25,697 × 6] (S3: spec_tbl_df/tbl_df/tbl/data.frame) -->
+<!--   ..$ shot_made_flag: num [1:25697] 0 1 0 1 0 1 1 0 0 1 ... -->
+<!--   ..$ shot_distance : num [1:25697] 15 16 22 0 14 0 12 12 25 17 ... -->
+<!--   ..$ t_sec         : num [1:25697] 622 465 412 379 572 532 372 216 116 660 ... -->
+<!--   ..$ home          : chr [1:25697] "away" "away" "away" "away" ... -->
+<!--   ..$ opponent      : chr [1:25697] "POR" "POR" "POR" "POR" ... -->
+<!--   ..$ season        : chr [1:25697] "2000-01" "2000-01" "2000-01" "2000-01" ... -->
+<!--  $ idx : int [1:2570] 2 4 24 35 55 56 61 63 64 74 ... -->
+<!--  - attr(*, "class")= chr "resample" -->
+<!-- ``` -->
+<!-- ```{r eval=FALSE, echo=TRUE, size = "tiny"} -->
+<!-- str(df$pred[[1]]) -->
+<!--  Named num [1:2570] 0.44 0.611 0.313 0.617 0.306 ... -->
+<!--  - attr(*, "names")= chr [1:2570] "1" "2" "3" "4" ... -->
+<!-- ``` -->
+
+
+# Clustering
+
+```{r}
+kobe %>% 
+    group_by(season, playoffs) %>% 
+    summarise(accuracy = mean(shot_made_flag)) %>% 
+    mutate(playoffs = if_else(playoffs == 1, "playoffs", "regular")) %>%
+  ggplot(aes(x = season, y = accuracy, group = playoffs, color = playoffs))+
+  geom_point(size = 3)+
+  geom_line() + 
+  labs(x="Season", y="Accuracy") +
+  scale_color_manual(name = "", values = col5[1:2])+
+  plot_theme+ 
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+
+## Hierarchical clustering based on distance 
+
+In exploring our data we decided to use hierarchical clustering as we wanted to apply methods learned in class. We decided that the ward.d2 clustering method was best to cluster Kobe’s 20 season career based off shot made flags, combined shot type, period, shot distance, playoffs, season, shot type, shot zone area, shot zone basic, shot zone range, t sec or time remaining in game, home or away, and opponent. Based on ward.d2, we notice that the ward.d2 clusters Kobe’s regular season and playoffs evenly. The purple is a cluster with all regular seasons and the yellow includes a mix of both playoffs and regular seasons.
+
+```{r hc setup}
+
+df <- kobe %>% 
+  dplyr::select(shot_made_flag, 
+                combined_shot_type, # 6
+                period, # 7
+                shot_distance, 
+                playoffs, # 2 on season and off season
+                season, # 20
+                shot_type,shot_zone_area,shot_zone_basic,shot_zone_range, # 2, 6, 7, 5
+                t_sec, home, opponent) %>% 
+  mutate(playoffs = if_else(playoffs == 1, "playoffs", "regular"),
+         period = if_else(period %in% 1:4, as.character(period), "beyond")) 
+
+df_wide <- df %>% 
+  group_by(season, playoffs) %>% 
+  nest() %>% 
+  mutate(accuracy = map_dbl(data, ~{mean(.x$shot_made_flag)}),
+         shot_distance = map_dbl(data, ~{mean(.x$shot_distance, na.rm = TRUE)}),
+         t_sec = map_dbl(data, ~{mean(.x$t_sec, na.rm = TRUE)}), 
+         period = map(data, ~{.x %>% count(period) %>% 
+             pivot_wider(names_from = period, names_prefix = "period", values_from = n)}),
+         shot_type = map(data, ~{.x %>% count(shot_type) %>%
+             pivot_wider(names_from = shot_type, names_prefix = "shot_type", values_from = n)}),
+         opponent = map(data, ~{.x %>% count(opponent) %>%
+             pivot_wider(names_from = opponent, names_prefix = "opponent", values_from = n)}),
+         combined_shot_type = map(data, ~{.x %>% count(combined_shot_type) %>% 
+             pivot_wider(names_from = combined_shot_type, names_prefix = "combined_shot_type", values_from = n)}),
+         home = map(data, ~{.x %>% count(home) %>%
+             pivot_wider(names_from = home, names_prefix = "home", values_from = n)}),
+         shot_zone_area = map(data, ~{.x %>% count(shot_zone_area) %>%
+             pivot_wider(names_from = shot_zone_area, names_prefix = "shot_zone_area", values_from = n)}),
+         shot_zone_range = map(data, ~{.x %>% count(shot_zone_range) %>% 
+             pivot_wider(names_from = shot_zone_range, names_prefix = "shot_zone_range", values_from = n)}),
+         shot_zone_basic= map(data, ~{.x %>% count(shot_zone_basic) %>% 
+             pivot_wider(names_from = shot_zone_basic, names_prefix = "shot_zone_basic", values_from = n)})
+         ) %>% 
+  unnest(c(period,shot_type, opponent, combined_shot_type, home, shot_zone_area,shot_zone_basic,shot_zone_range)) %>% 
+  mutate(accuracy = percent_format(accuracy = 0.001)(accuracy)) %>%
+  replace(is.na(.), 0) %>% 
+  mutate(season_playoffs = str_c(season, playoffs, accuracy, sep = "_")) %>% 
+  ungroup() %>% 
+  dplyr::select(-c(data, playoffs, season, accuracy)) %>% 
+  dplyr::select(season_playoffs, everything())
+  
+df_scale <- df_wide %>% 
+  select(-season_playoffs) %>% 
+  scale() %>% 
+  as.matrix()
+row.names(df_scale) <- df_wide$season_playoffs
+```
+
+
+```{r fig.height=4, fig.width=10, message=FALSE, warning=FALSE}
+hc_eucl <- df_scale %>% 
+  dist() %>% 
+  hclust(method = "ward.D2") # using ward.D2
+
+data_scale <- hc_eucl %>% 
+  as.dendrogram() %>% 
+  dendro_data() # obtain data for geom_segement
+
+class_scale <- hc_eucl %>% 
+  cutree(k=2) %>% 
+  enframe(name = "label", value = "class") %>% 
+  left_join(data_scale %>% label()) %>% # obtain class through cutree
+  mutate(class = factor(class))
+
+data_scale %>% 
+  segment() %>% 
+  as_tibble() %>% 
+  ggplot() +
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend))+
+  geom_text(data = class_scale, 
+            aes(label = label, x = x, y = 0, color = class), 
+            size = 4, hjust = 1, angle = 90)+ #hjust = 1 is right ahjustment. 
+  scale_color_manual(values = c(col5[1],col5[2]))+ 
+  ylim(low = -45, high = NA)+
+  theme_void()+
+  theme(legend.position = "none")
+```
+
+
+## Hierarchical clustering based correlation
+Instead of the distance method of ward.d2, we wanted to use clustering based on correlation. 
+The clustering based off correlation doesn’t seem to be as effective in clustering as it is not as even as ward.d2 and both clusters have a mix of regular seasons and playoffs.
+
+```{r fig.height=4, fig.width=10, message=FALSE, warning=FALSE}
+## correlatio 
+hc_cor <- df_scale %>% 
+  DiffCorr::cor.dist() %>% # correlation distance is calculated here. 
+  as.dist() %>% 
+  hclust(method = "ward.D2") # using ward.D2
+
+data_scale <- hc_cor %>% 
+  as.dendrogram() %>% 
+  dendro_data() # obtain data for geom_segement
+
+class_scale <- hc_cor %>% 
+  cutree(k=2) %>% 
+  enframe(name = "label", value = "class") %>% 
+  left_join(data_scale %>% label()) %>% # obtain class through cutree
+  mutate(class = factor(class))
+
+data_scale %>% 
+  segment() %>% 
+  as_tibble() %>% 
+  ggplot() +
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend))+
+  geom_text(data = class_scale, 
+            aes(label = label, x = x, y = 0, color = class), 
+            size = 4, hjust = 1, angle = 90)+ #hjust = 1 is right ahjustment. 
+  scale_color_manual(values = c(col5[1],col5[2]))+ 
+  ylim(low = -5, high = NA)+
+  theme_void()+
+  theme(legend.position = "none")
+```
+
+
+# Shot prediction
+## Choosing a cutoff for full GLM model
+
+For the GLM model, we wanted to find the best cutoff in order to get the minimum misclassification error. 
+We ran all the cutoffs and found that the cutoff of 0.523 would lead to the minimum misclassification error of 0.391. The minimum misclassification error would be best to help determine Kobe’s accuracy.
+
+```{r fig.height=4, fig.width=10}
+cut <- seq(0.375, 0.6, 0.001)
+misclass_error <- readRDS("data/glm_vary_cutoff")
+tibble(cutoff = cut, misclass10fold_cv = sapply(misclass_error, mean) %>% unlist()) %>% 
+  ggplot(aes(cutoff, misclass10fold_cv))+
+  geom_smooth(method = 'loess', formula = 'y ~ x', color = "#552583")+
+  geom_point(data = . %>% filter(misclass10fold_cv == min(.$misclass10fold_cv)), color = "#FDB927",  size = 2)+ 
+  geom_text(data = . %>% filter(misclass10fold_cv == min(.$misclass10fold_cv)), aes(label = paste0("(", cutoff %>% signif(., digits = 3), ", ",  misclass10fold_cv %>% signif(., digits = 3), ")")), nudge_y = 0.003)+
+  ylab("mean of misclassification error \nbased on 10 fold crossvalidation")+
+  plot_theme
+
+```
+
+## Selecting variables that best predict his accuracy 
+
+For selecting variables to predict accuracy, we used the forward selection method similar to the homework. First we used period as a predictor of accuracy, then continually added each variable one at a time. 
+We found that period, shot distance, and playoffs were the best variables to predict Kobe’s accuracy. We determine that by the misclassification error which was lowest with period, shot distance, and playoffs as predictors.
+
+```{r fig.height=4, fig.width=10}
+## fowards selection based on mean misclassification error. 
+#period = 0.4461621
+#period+shot_distance = 0.3965057
+#period+shot_distance+playoffs = 0.3965057
+#period+shot_distance+playoffs+season = 0.3969332
+#period+shot_distance+playoffs+season+shot_type = 0.3970893
+#period+shot_distance+playoffs+season+shot_type+shot_zone_area = 0.3978667
+#period+shot_distance+playoffs+season+shot_type+shot_zone_area+shot_zone_basic = 0.3917971
+#period+shot_distance+playoffs+season+shot_type+shot_zone_area+shot_zone_basic+t_sec = 0.3917189
+#period+shot_distance+playoffs+season+shot_type+shot_zone_area+shot_zone_basic+t_sec+home = 0.391718
+#period+shot_distance+playoffs+season+shot_type+shot_zone_area+shot_zone_basic+t_sec+home+opponent = 0.3915637
+
+sel <- tibble(no_of_var = 1L:10L, 
+       best_class_error = c(0.4461621, 0.3965057, 0.3965057, 0.3969332,0.3970893,0.3978667,0.3917971,0.3917189,0.391718,0.3915637),
+       period = c(rep(1, 10)) %>% rev(), 
+       shot_distance = c(rep(1, 9), 0) %>% rev(),
+       playoffs = c(rep(1, 8), rep(0, 2))%>% rev(),
+       season = c(rep(1, 7), rep(0, 3))%>% rev(),
+       shot_type = c(rep(1, 6), rep(0, 4))%>% rev(),
+       shot_zone_area = c(rep(1, 5), rep(0, 5))%>% rev(), 
+       shot_zone_basic = c(rep(1, 4), rep(0, 6))%>% rev(), 
+       t_sec = c(rep(1, 3), rep(0, 7))%>% rev(), 
+       home = c(rep(1, 2), rep(0, 8))%>% rev(), 
+       opponent = c(rep(1, 1), rep(0, 9))%>% rev()
+       )
+sel_wild <- sel %>% 
+  select(-best_class_error) %>% 
+  pivot_longer(cols = period:opponent, names_to = "var", values_to = "have") %>% 
+  mutate(var = factor(var, levels = c("period", "shot_distance", "playoffs", "season", "shot_type", "shot_zone_area", "shot_zone_basic","t_sec", "home", "opponent") %>% rev()),
+         have = factor(have))
+  
+  
+  
+p1 <- ggplot(sel, aes(no_of_var,best_class_error))+
+  geom_smooth(se = FALSE, method = 'loess',formula= 'y ~ x', color = "#552583")+
+  geom_point(data = . %>% filter(no_of_var == 3), color = "#FDB927", size = 2)+
+  scale_x_continuous(breaks = 1:10)+ 
+  xlab("")+
+  ylab("minimal mean \nmisclassification error")+
+  theme_bw() +
+  theme(legend.title=element_blank(),
+        legend.position="bottom",
+        plot.title=element_text(hjust=0.5),
+        plot.subtitle=element_text(hjust=0.5)) 
+
+
+p2 <- ggplot(sel_wild, aes(no_of_var, var, color = have))+
+  geom_point()+
+  scale_x_continuous(breaks = 1:10)+
+  scale_color_manual(values = c("white", "black"))+
+  xlab("")+
+  ylab("")+
+  theme_bw() +
+  theme(legend.title=element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x  = element_blank(),
+        legend.position="none",
+        plot.title=element_text(hjust=0.5),
+        plot.subtitle=element_text(hjust=0.5),
+        panel.grid.major = element_line(color = "white"))
+grid::grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
+```
+
+
+
+## Shot accuracy towards the end of the game
+
+How clutch was Kobe? Clutch is something done well when in a crucial situation. For example Kobe hitting a clutch shot to win the game as time runs out. In order to calculate this, we compare accuracy by time remaining in the game. We filtered by the last two minutes of the 4th period or Overtime if included because that is when Kobe would need to be clutch. We created two linear models using fourth quarter or overtime and game time left to predict accuracy for the regular season and playoffs. It’s hard to conclude whether Kobe is clutch  because Kobe shot so many shots and a crucial situation is intangible.
+But we found that fourth quarter or overtime and game time left is significant to predict accuracy for the regular season, but not the playoffs. This may be because there are not as many games in the playoffs compared to the regular season.
+
+```{r}
+Clutchregularseason <- kobe %>% 
+   filter(period %in% c(4:7)) %>%
+  mutate(period = as.character(period),
+    Quarter = if_else(period %in% c(5:7), "Overtime",period),Quarter=factor( Quarter))%>%
+  group_by(seconds_remaining,minutes_remaining,Quarter, playoffs) %>%
+  summarise(accuracy = sum(shot_made_flag)/n()) %>%
+  mutate(gametime_by_seconds = minutes_remaining * 60 + seconds_remaining, 
+         playoffs = if_else(playoffs == 1, "playoffs", "regular")) %>%
+  filter(gametime_by_seconds <= 120)
+
+Clutchregularseason %>% 
+  ggplot() + 
+  geom_point(mapping = aes(x = gametime_by_seconds , y = accuracy, color =  Quarter))+
+  facet_grid(playoffs ~  Quarter)+
+  scale_color_manual(values = col5[1:2])+
+  theme(legend.position = "none")+
+  plot_theme
+```
+
+Playoffs
+```{r eval=FALSE, echo=TRUE,size = "tiny"}
+Coefficients:
+                    Estimate Std. Error t value Pr(>|t|)    
+(Intercept)         0.312496   0.076956   4.061 8.84e-05 ***
+QuarterOvertime     0.145024   0.100721   1.440    0.153    
+gametime_by_seconds 0.001350   0.001097   1.230    0.221  
+
+Residual standard error: 0.4248 on 118 degrees of freedom
+Multiple R-squared:  0.0267,	Adjusted R-squared:  0.01021 
+F-statistic: 1.619 on 2 and 118 DF,  p-value: 0.2025
+```
+Regular season
+```{r eval=FALSE, echo=TRUE,size = "tiny"}
+Coefficients:
+                     Estimate Std. Error t value Pr(>|t|)    
+(Intercept)         0.2964657  0.0441531   6.715 1.99e-10 ***
+QuarterOvertime     0.1324562  0.0423870   3.125  0.00205 ** 
+gametime_by_seconds 0.0018200  0.0005894   3.088  0.00231 ** 
+  
+Residual standard error: 0.2908 on 196 degrees of freedom
+Multiple R-squared:  0.083,	Adjusted R-squared:  0.07364 
+F-statistic:  8.87 on 2 and 196 DF,  p-value: 0.0002052
+---
+```
+
+
+# Game influence 
+## Does Kobe have a positive influence on overall game? 
+
+We wanted to calculate Kobe’s game influence so how much he impacted the lakers. We had to add a new dataset to include whether the Lakers won the game or not. We had trouble joining the dataset, because it was raw data and was not as clean as the kaggle data. A lot of time was spent cleaning the data to be able to join rather than exploring the data. We created a linear model using Kobe’s accuracy to predict if the Lakers won or not. We find that Kobe’s accuracy is very significant in predicting whether the Lakers won.
+
+```{r eval=FALSE, echo=TRUE,size = "tiny"}
+glm(WL~accuracyByDay, data = wl, family = binomial) %>% summary()
+
+Call:
+glm(formula = WL ~ accuracyByDay, family = binomial, data = wl)
+
+Deviance Residuals: 
+    Min       1Q   Median       3Q      Max  
+-2.1330  -1.2744   0.8276   0.9900   1.5683  
+
+Coefficients:
+              Estimate Std. Error z value Pr(>|z|)    
+(Intercept)    -0.8839     0.1869  -4.730 2.25e-06 ***
+accuracyByDay   3.0502     0.4140   7.367 1.74e-13 ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+(Dispersion parameter for binomial family taken to be 1)
+
+    Null deviance: 1888.8  on 1411  degrees of freedom
+Residual deviance: 1829.7  on 1410  degrees of freedom
+AIC: 1833.7
+
+```
+
+## How much Kobe need to score for the team to win? 
+We then created a graph of Kobe’s shot made compared to the team win rate. We notice that the more shots Kobe makes the higher the win rate of the lakers.
+It stood out that when Kobe makes thirteen shots the Lakers have a high win rate of 76%. If Kobe makes more than eighteen shots the Lakers always win.
+
+```{r fig.align='center', fig.height=5, message=FALSE, warning=FALSE}
+wl %>% 
+  group_by(shootByDay) %>% 
+  ggplot()+
+  geom_histogram(aes(x = shootByDay, group = WL, fill = WL), position = "fill", binwidth = 1)+
+  geom_text(data = . %>% 
+              count(shootByDay, WL) %>% 
+              group_by(shootByDay) %>% 
+              summarise(sumn = sum(n),
+                        winrate = n[WL == "W"] /sumn,
+                        perc_winrate = percent_format()(winrate)), 
+            aes(x = shootByDay, y = 1, label = sumn),  nudge_y = -0.02)+
+  geom_text(data = . %>% 
+              count(shootByDay, WL) %>% 
+              group_by(shootByDay) %>% 
+              summarise(sumn = sum(n),
+                        winrate = n[WL == "W"] /sumn,
+                        perc_winrate = percent_format()(winrate)), 
+            aes(x = shootByDay, y = winrate, label = perc_winrate), nudge_y = 0.02, size = 3)+
+  scale_fill_manual(name = "", values = c("L" = col5[2], "W" = col5[1]), labels = c("game lost", "game win"))+
+  xlab("Number of shots made in each game")+
+  ylab("team win rate \n(top: total game count)")+
+  plot_theme
+
+```
+
+
+# Conclusion
+## Were we able to answer our questions?
+
+**Predicting how many shots Kobe will score in a given game using his accuracy?**
+- To answer this question required significantly more work, but we were able to predict which variables contributed to his accuracy: time period, shot distance, and whether or not the team was in the playoffs. 
+
+
+**What types of shots (layups, jump shots, etc.) does Kobe do best (highest accuracy)? **
+- Kobe’s best shots are dunks and jump shots. This made sense since Kobe is a Slam Dunk champion and won an award for it in 1997.
+- His weakest shots are tip shots. 
+
+
+**What are his strengths and weaknesses as a basketball player?** 
+- For this question, we had to keep in mind what Kobe’s position was. Kobe was a shooting guard which means his greatest strength is shooting shots, and that is exactly what our data showed us. While shooting guards tend to be weak in defense, Kobe’s weaknesses were passing and attempting very difficult shots.
+
+**What parts of the court is he the most accurate in?**
+- According to our data, Kobe shoots best from the sidelines of the court and when he’s about 8 to 24 ft. away from the basket.
+
+
+**How clutch was Kobe?**
+- This question was inconclusive. Kobe’s accuracy does not change much throughout the quarters regardless of whether it is the regular season or playoffs. 
+
+
+**What season(s) was Kobe’s prime?**
+- 2007 to 2010 based on number of points and accuracy. 
+
+
+**How Kobe improved/ receded over time?**
+- Kobe seemed to play really well and make points consistently from 2004 to 2010.  We see significant drops during 2012-2014. Kobe had gotten a severe Achilles injury in 2013 which could explain the drops and as he got older he didn’t perform as well. He also ended up missing most of 2014 due to surgery. His athletic career came to an end in 2016, which is 2-3 years after a horrible basketball injury. 
+
+
+**What is Kobe’s influence on the game’s win or loss? **
+- While our Kaggle data set could help us answer most of these questions, we still needed additional information to answer other related questions. So we looked at some outside datasets and did some additional research as well in order to answer these questions. 
+
+- Season(s) he won MVP?  
++ 2007- 2008
+
+- Seasons he was severely injured? 
++ 2013 
+
+- Could these variables also be used to see how well other NBA basketball players have performed on their respective teams? Is it dependent on their positions/teams they played for?
++ Kobe is an exceptional player and does not match anyone else’s profile as an athlete. It would be a difficult comparison so this question was inconclusive for us. 
+ 
+- **What is Kobe’s influence on the game’s win or loss?
++ Kobe is really good at scoring points, so generally we noticed as Kobe scored more points the team was more likely to win. 
+
+
+**In conclusion, we found that our data and discoveries matched the kind of player Kobe was. He was known as a great shooter and carried his team to many victories. His accuracy and success as a player can be attributed to his phenomenal shooting abilities and we as a team had a great time exploring that.**
+
+
+## How has the work been split?
+- Patrick: **The basketball expert** to make sure we are using the correct variables and making reasonable predictions. 
+- Lauren: **Statistical modeling** and testing variables to make sure our data makes sense. 
+- Shiyuan: **Coding** and dealing with any difficulties we have with coding. 
+- Natasha: Data Visualization and **overall clean up**. Typing up all project related info. 
+
+<!-- ## *Thank you for your attention!* -->
+<!-- ```{r echo=FALSE, fig.align='center', out.height="200px"} -->
+<!-- knitr::include_graphics("img/goodbye.jpg") -->
+<!-- ``` -->
+
+
+## References
